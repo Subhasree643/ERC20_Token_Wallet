@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DecodeLabs ERC-20 Wallet</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 24px; }
+    .card { max-width: 520px; margin: 0 auto; background: #1e293b; border-radius: 12px; padding: 24px; }
+    h1 { font-size: 1.3rem; margin-top: 0; }
+    label { display: block; margin: 14px 0 4px; font-size: .85rem; color: #94a3b8; }
+    input { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; }
+    button { margin-top: 16px; padding: 10px 16px; border: 0; border-radius: 8px; background: #38bdf8; color: #0f172a; font-weight: 600; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .row { display: flex; gap: 8px; }
+    #status { margin-top: 16px; padding: 10px; border-radius: 8px; background: #0f172a; min-height: 1.2em; white-space: pre-wrap; word-break: break-all; }
+    .ok { color: #4ade80; } .err { color: #f87171; }
+    .balance { font-size: 1.4rem; margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>DecodeLabs ERC-20 Token Wallet</h1>
+
+    <button id="connectBtn">Connect MetaMask</button>
+    <div id="account"></div>
+
+    <label for="tokenAddr">Token contract address</label>
+    <input id="tokenAddr" placeholder="0x..." autocomplete="off" />
+    <button id="loadBtn" disabled>Load token</button>
+
+    <div class="balance" id="balance"></div>
+
+    <label for="to">Recipient address</label>
+    <input id="to" placeholder="0x..." autocomplete="off" />
+    <label for="amount">Amount</label>
+    <input id="amount" placeholder="e.g. 12.5" inputmode="decimal" autocomplete="off" />
+    <button id="sendBtn" disabled>Send</button>
+
+    <div id="status"></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+  <script>
+    const ABI = [
+      "function name() view returns (string)",
+      "function symbol() view returns (string)",
+      "function decimals() view returns (uint8)",
+      "function balanceOf(address) view returns (uint256)",
+      "function transfer(address to, uint256 amount) returns (bool)",
+    ];
+
+    let provider, signer, token, decimals, symbol, account;
+    const $ = (id) => document.getElementById(id);
+
+    function setStatus(msg, cls) {
+      const el = $("status");
+      el.textContent = msg;           // textContent (never innerHTML) -> no XSS from user input
+      el.className = cls || "";
+    }
+
+    async function refreshBalance() {
+      const raw = await token.balanceOf(account);
+      // BigInt -> string via formatUnits: never convert to JS Number (double precision!)
+      $("balance").textContent = `Balance: ${ethers.formatUnits(raw, decimals)} ${symbol}`;
+      return raw;
+    }
+
+    $("connectBtn").onclick = async () => {
+      try {
+        if (!window.ethereum) throw new Error("MetaMask not found");
+        provider = new ethers.BrowserProvider(window.ethereum);
+        await provider.send("eth_requestAccounts", []);
+        signer = await provider.getSigner();
+        account = await signer.getAddress();
+        $("account").textContent = "Connected: " + account;
+        $("loadBtn").disabled = false;
+        setStatus("Wallet connected. Enter the token address and click Load token.", "ok");
+      } catch (e) { setStatus(e.message, "err"); }
+    };
+
+    $("loadBtn").onclick = async () => {
+      try {
+        const addr = $("tokenAddr").value.trim();
+        if (!ethers.isAddress(addr)) throw new Error("Invalid token contract address");
+        token = new ethers.Contract(addr, ABI, signer);
+        decimals = Number(await token.decimals());
+        symbol = await token.symbol();
+        await refreshBalance();
+        $("sendBtn").disabled = false;
+        setStatus(`Loaded ${await token.name()} (${symbol})`, "ok");
+      } catch (e) { setStatus("Could not load token: " + e.message, "err"); }
+    };
+
+    $("sendBtn").onclick = async () => {
+      const btn = $("sendBtn");
+      try {
+        // ---- INPUT: validate ----
+        const to = $("to").value.trim();
+        const amountStr = $("amount").value.trim();
+        if (!ethers.isAddress(to)) throw new Error("Invalid recipient address");
+        if (to === ethers.ZeroAddress) throw new Error("Recipient cannot be the zero address");
+        const pattern = new RegExp(`^\\d+(\\.\\d{1,${decimals}})?$`);
+        if (!pattern.test(amountStr)) {
+          throw new Error(`Amount must be a non-negative number with at most ${decimals} decimals`);
+        }
+
+        // ---- Scaling: string -> BigInt ----
+        const amount = ethers.parseUnits(amountStr, decimals);
+        if (amount === 0n) throw new Error("Amount must be greater than 0");
+        const balance = await token.balanceOf(account);
+        if (amount > balance) {
+          throw new Error(`Insufficient balance: you have ${ethers.formatUnits(balance, decimals)} ${symbol}`);
+        }
+
+        // ---- PROCESS ----
+        btn.disabled = true;
+        setStatus("Confirm the transaction in MetaMask...");
+        const tx = await token.transfer(to, amount);
+        setStatus("Transaction sent, waiting for confirmation...\n" + tx.hash);
+        await tx.wait();
+
+        // ---- OUTPUT: UI synchronisation ----
+        await refreshBalance();
+        setStatus(`Sent ${amountStr} ${symbol} to ${to}\nTx: ${tx.hash}`, "ok");
+      } catch (e) {
+        setStatus(e.shortMessage || e.message, "err");
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  </script>
+</body>
+</html>
